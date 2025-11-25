@@ -1,0 +1,9 @@
+<map id="common/easynav_simple_common/include/easynav_simple_common/SimpleMap.hpp" name="common/easynav_simple_common/include/easynav_simple_common/SimpleMap.hpp">
+<area shape="rect" id="Node000001" title="Declaration of the SimpleMap type." alt="" coords="5,5,222,61"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="6,116,64,142"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="93,63,56,107,52,103,89,60"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="88,116,139,142"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="116,62,116,101,111,101,111,62"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="163,109,339,150"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="155,59,211,98,208,102,152,64"/>
+</map>

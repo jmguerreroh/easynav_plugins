@@ -1,0 +1,26 @@
+<map id="common/easynav_simple_common/src/easynav_simple_common/SimpleMap.cpp" name="common/easynav_simple_common/src/easynav_simple_common/SimpleMap.cpp">
+<area shape="rect" id="Node000001" title=" " alt="" coords="352,5,549,61"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,116,80,142"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="352,53,227,77,91,112,86,113,84,108,90,106,225,72,351,48"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="103,116,160,142"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="352,59,264,82,173,112,170,112,168,107,171,106,263,77,351,54"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="184,116,250,142"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="381,64,262,111,260,113,258,108,260,107,379,59"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="274,116,345,142"/>
+<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="411,64,341,110,338,106,408,59"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="368,116,437,142"/>
+<area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="439,63,418,104,413,102,434,60"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="461,116,538,142"/>
+<area shape="poly" id="edge6_Node000001_Node000007" title=" " alt="" coords="467,60,489,102,484,104,462,63"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="581,205,632,231"/>
+<area shape="poly" id="edge7_Node000001_Node000008" title=" " alt="" coords="497,59,526,81,553,107,580,149,599,189,594,192,576,152,548,111,522,85,494,64"/>
+<area shape="rect" id="Node000009" title=" " alt="" coords="678,205,735,231"/>
+<area shape="poly" id="edge8_Node000001_Node000009" title=" " alt="" coords="550,40,623,49,696,62,758,81,782,93,798,107,805,120,806,133,794,158,771,181,744,199,741,195,767,177,789,155,800,132,800,122,794,111,779,98,756,86,695,68,622,54,549,45"/>
+<area shape="rect" id="Node000010" title=" " alt="" coords="776,198,952,238"/>
+<area shape="poly" id="edge9_Node000001_Node000010" title=" " alt="" coords="550,41,626,52,705,66,774,84,800,95,820,107,835,123,847,142,861,181,856,183,842,144,831,126,817,111,798,100,772,89,704,71,625,57,549,47"/>
+<area shape="rect" id="Node000011" href="$SimpleMap_8hpp.html" title="Declaration of the SimpleMap type." alt="" coords="613,109,784,150"/>
+<area shape="poly" id="edge10_Node000001_Node000011" title=" " alt="" coords="523,59,633,101,632,106,521,64"/>
+<area shape="poly" id="edge12_Node000011_Node000008" title=" " alt="" coords="679,152,632,196,628,192,676,148"/>
+<area shape="poly" id="edge11_Node000011_Node000009" title=" " alt="" coords="703,150,707,190,701,190,698,150"/>
+<area shape="poly" id="edge13_Node000011_Node000010" title=" " alt="" coords="737,148,814,188,812,193,735,153"/>
+</map>
