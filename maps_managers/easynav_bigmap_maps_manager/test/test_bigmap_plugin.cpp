@@ -1185,10 +1185,16 @@ TEST_F(BigMapPluginTest, TheSaveServicesAreSafeToCallFromAnotherThreadWhileTheRo
         }
       }
     });
-  // the robot drives (the real-time thread): marks ground, re-meshes, writes the saves
-  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+  // the robot drives (the real-time thread): marks ground, re-meshes, writes the saves. It drives
+  // until both sides have done enough, not for a fixed time: a coverage build on a shared CI
+  // runner takes ~250 ms per update() with saves
+  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(60);
   int updates = 0;
-  for (double t = 0.0; std::chrono::steady_clock::now() < end; t += 0.1, ++updates) {
+  for (double t = 0.0;
+    (updates <= 50 || answered.load() <= 20 || accepted.load() == 0) &&
+    std::chrono::steady_clock::now() < end;
+    t += 0.1, ++updates)
+  {
     nav_msgs::msg::Odometry o;
     o.header.frame_id = "map";
     o.pose.pose.position.x = 8.0 * std::sin(t);
