@@ -88,6 +88,7 @@ void BigMapMapsManager::on_initialize()
   sensor_range_ = param("sensor_range", -1.0);
   if (sensor_range_ <= 0.0) {sensor_range_ = lp.min_radius;}
   sensor_range_ = std::min(sensor_range_, forget_distance_);
+  rebuild_period_ = param("rebuild_period", rebuild_period_);
 
   // Built once, on every core: a startup step, not part of the cycle
   const auto st = lod_.build(source, lp, std::max(1u, std::thread::hardware_concurrency()));
