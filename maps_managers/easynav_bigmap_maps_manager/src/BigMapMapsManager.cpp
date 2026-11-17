@@ -219,12 +219,15 @@ void BigMapMapsManager::on_initialize()
   params_.low_res_distance = param_any({"lengths.radii.low_res_start",
         "lod_settings.low_res_distance"}, 200.0);
   hysteresis_ = param_any({"lengths.remesh_step", "lod_settings.hysteresis"}, 2.0);
+  // the occupancy block first: its sizes and radii replace those above, and what keeps free ground
+  // fine is off by default
+  const bool occupancy_mode = read_occupancy_params();
   profile_enabled_ = param_any({"output.profile.enabled", "profile.enabled"}, false);
   profiler_ = bigmap_maps_manager::Profiler(param_any({"output.profile.period", "profile.period"},
         5.0));
   save_directory_ = expand(param_any({"output.save_directory", "save.directory"},
         std::string("~/.ros/bigmap/saved")));
-  trail_enabled_ = param_any({"traversed.enabled", "traversed_ground.enabled"}, true);
+  trail_enabled_ = param_any({"traversed.enabled", "traversed_ground.enabled"}, !occupancy_mode);
   trail_mark_radius_ = param_any({"lengths.radii.traversed_mark", "traversed_ground.mark_radius"},
         1.0);
   {
@@ -257,8 +260,9 @@ void BigMapMapsManager::on_initialize()
   max_slope_deg_ = param_any({"terrain.max_slope_deg", "max_slope_deg"}, 35.0);
   // the holes of the map (its obstacles): their border counts as this height error (m)
   const double hole_error = param("lod.hole_error", 0.0);
-  // obstacle borders seen from near stay at full resolution (within observed_full_res of them)
-  observed_enabled_ = param("lod.observed.enabled", true);
+  // obstacle borders seen from near stay at full resolution (within observed_full_res of them);
+  // with occupancy.keep_path, until the robot is farther than occupancy.forget_distance
+  observed_enabled_ = param("lod.observed.enabled", !occupancy_mode) || keep_path_;
   observed_mark_radius_ = param("lengths.radii.observed_mark", params_.high_res_radius);
   params_.observed_margin = param("lengths.radii.observed_full_res", 1.0);
   recovery_enabled_ = param("recovery.enabled", true);
@@ -274,7 +278,7 @@ void BigMapMapsManager::on_initialize()
             "recovery.max_full_res_factor >= 1 are required");
   }
   publish_markers_ = param_any({"output.publish_markers", "publish_markers"}, true);
-  dynamic_enabled_ = param("dynamic_map.enabled", true);
+  dynamic_enabled_ = param("dynamic_map.enabled", !occupancy_mode);
   {
     // Only what the sensors see inside the small circle (lengths.radii.full_res, the blue
     // one) is used. max_range can make it smaller; 0 = the whole circle.
@@ -327,7 +331,9 @@ void BigMapMapsManager::on_initialize()
     std::string("bigmap_dynamic")));
   obstacles_from_filter_ = detector == bigmap_maps_manager::ObstacleDetector::NavmapFilter;
   removal_enabled_ = param_any({"obstacles.removal.enabled", "obstacle_removal.enabled"}, true);
-  removal_radius_ = param_any({"lengths.radii.obstacle_clearance", "obstacle_removal.radius"}, 1.0);
+  // (occupancy mode: 0, only the obstacle's NavCels; the inflation keeps the distance)
+  removal_radius_ = param_any(
+    {"lengths.radii.obstacle_clearance", "obstacle_removal.radius"}, occupancy_mode ? 0.0 : 1.0);
   if (removal_radius_ < 0.0) {
     throw std::invalid_argument("[" + name + "] lengths.radii.obstacle_clearance must be >= 0");
   }
@@ -696,6 +702,8 @@ void BigMapMapsManager::on_initialize()
   }
 
 
+  if (occupancy_mode) {build_occupancy();}
+
   RCLCPP_INFO(
     node->get_logger(),
     "[%s] lengths (m): radii traversed_mark %.1f, traversed_full_res %.1f, "
@@ -722,7 +730,8 @@ void BigMapMapsManager::on_initialize()
   RCLCPP_INFO(
     node->get_logger(), "[%s] obstacle borders seen from near kept fine: %s (within %.1f m, "
     "%.1f m around them); hole error %.2f m; recovery on no path: %s; re-mesh in a worker: %s",
-    name.c_str(), observed_enabled_ ? "yes" : "no", observed_mark_radius_,
+    name.c_str(), keep_path_ ? "yes (keep_path)" : (observed_enabled_ ? "yes" : "no"),
+    observed_mark_radius_,
     params_.observed_margin, hole_error, recovery_enabled_ ? "yes" : "no",
     async_remesh_ ? "yes" : "no");
   watchdog_.start(wall_seconds());
@@ -1507,6 +1516,111 @@ void BigMapMapsManager::mark_observed(double x, double y, double z)
   }
 }
 
+bool BigMapMapsManager::read_occupancy_params()
+{
+  auto node = get_node();
+  const std::string name = get_plugin_name();
+  // The occupancy block (`occupancy.*`): if any of its parameters is given, bigmap works this way
+  // (what is occupied is fine near the robot, free ground as large as it can be, doors and walls
+  // kept far away); else as always (distance)
+  const std::string prefix = name + ".occupancy.";
+  bool on = false;
+  for (const auto & kv : node->get_node_parameters_interface()->get_parameter_overrides()) {
+    if (kv.first.rfind(prefix, 0) == 0) {on = true; break;}
+  }
+  if (!on) {return false;}
+  auto param_of = [&](const std::string & key, auto def) {
+      easynav::declare_parameter_if_absent(*node, name + "." + key, def);
+      node->get_parameter(name + "." + key, def);
+      return def;
+    };
+  // (what is not given takes the value of its lengths.* counterpart)
+  params_.min_size = param_of("occupancy.cell_size.min", params_.min_size);
+  params_.max_size = param_of("occupancy.cell_size.max", params_.max_size);
+  params_.high_res_radius = param_of("occupancy.min_radius", params_.high_res_radius);
+  params_.low_res_distance = param_of("occupancy.max_radius", params_.low_res_distance);
+  occ_forget_radius_ = param_of("occupancy.forget_distance", params_.low_res_distance);
+  keep_path_ = param_of("occupancy.keep_path", false);
+  if (params_.min_size <= 0.0 || params_.max_size < params_.min_size ||
+    params_.high_res_radius < 0.0 || params_.low_res_distance < params_.high_res_radius ||
+    occ_forget_radius_ < params_.high_res_radius)
+  {
+    throw std::invalid_argument(
+            "[" + name + "] occupancy: 0 < cell_size.min <= cell_size.max, 0 <= min_radius <= "
+            "max_radius and forget_distance >= min_radius are required");
+  }
+  return true;
+}
+
+void BigMapMapsManager::build_occupancy()
+{
+  auto node = get_node();
+  const std::string name = get_plugin_name();
+  if (surface_) {
+    throw std::invalid_argument(
+            "[" + name + "] the occupancy block needs the grid engine (multilevel.enabled: false)");
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  occupancy_ = std::make_unique<bigmap_maps_manager::OccupancyLod>(
+    mesher_->dem(), mesher_->error_map().tile_size(), mesher_->cell_valid(),
+    static_cast<int>(std::floor(params_.max_size / mesher_->dem().resolution + 1e-9)));
+  RCLCPP_INFO(
+    node->get_logger(),
+    "[%s] occupancy: what is occupied (the borders of the map's holes, the sensed obstacles) has "
+    "NavCels of %.2f m within %.1f m (min_radius), growing to %.1f m at %.1f m (max_radius); free "
+    "ground is as large as the height error allows; sensed obstacles%s are forgotten beyond %.1f m "
+    "(forget_distance); %zu nodes refined so that no NavCel opens a wall or closes a door; "
+    "%.1f MB, built in %.0f ms",
+    name.c_str(), params_.min_size, params_.high_res_radius, params_.max_size,
+    params_.low_res_distance, keep_path_ ? " and the borders kept along the path (keep_path)" : "",
+    occ_forget_radius_, occupancy_->topology_count(),
+    occupancy_->memory_bytes() / 1e6,
+    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+  if (!memory_) {
+    RCLCPP_WARN(
+      node->get_logger(), "[%s] LOD by occupancy without the obstacle memory (detector "
+      "bigmap_dynamic): the sensed obstacles do not refine the map", name.c_str());
+  }
+}
+
+void BigMapMapsManager::sync_occupancy(double x, double y)
+{
+  if (!memory_) {return;}
+  const double now = get_node()->now().seconds();
+  // beyond the forget radius the sensed obstacles go, the fixed ones too: their NavCels merge back
+  if (memory_->forget_outside(x, y, occ_forget_radius_) > 0) {
+    dyn_dirty_ = true;   // what they blocked is released
+  }
+  if (remesh_job_.valid()) {return;}   // the worker reads the keys: next cycle
+  // the obstacles now: fixed ones, and those still being seen (a hit in the last period)
+  std::vector<std::pair<int, int>> cells;
+  if (memory_active()) {
+    const auto & dem = mesher_->dem();
+    const double res = dem.resolution, cs = memory_->cell_size();
+    const int center = (dem.side - 1) / 2;
+    for (const auto & kv : memory_->cells()) {
+      const auto & c = kv.second;
+      if (!memory_->fixed(c) && now - c.last > 1.5 * memory_min_time_) {continue;}
+      // the DEM cells inside the memory cell (cell (i, j) spans x in [(i - center) res, + res))
+      const double x0 = std::floor(c.x / cs) * cs, y0 = std::floor(c.y / cs) * cs;
+      const int i0 = static_cast<int>(std::floor(x0 / res + 1e-6)) + center;
+      const int j0 = static_cast<int>(std::floor(y0 / res + 1e-6)) + center;
+      const int n = std::max(1, static_cast<int>(std::lround(cs / res)));
+      for (int j = j0; j < j0 + n; ++j) {
+        for (int i = i0; i < i0 + n; ++i) {
+          cells.push_back({i, j});
+        }
+      }
+    }
+  }
+  if (occupancy_->set_obstacles(cells)) {occ_pending_ = true;}
+  if (occ_pending_ && now - occ_last_remesh_ >= kOccRebuildPeriod) {
+    occ_pending_ = false;
+    occ_last_remesh_ = now;
+    force_remesh_ = true;   // the next cycle
+  }
+}
+
 void BigMapMapsManager::prepare_remesh(double x, double y, double z)
 {
   mark_observed(x, y, z);
@@ -1514,7 +1628,9 @@ void BigMapMapsManager::prepare_remesh(double x, double y, double z)
     if (trail_enabled_ && !trail_persistent_) {
       surface_->forget_outside(x, y, z, trail_keep_radius_);
     }
-    if (!trail_persistent_) {surface_->forget_observed_outside(x, y, z, trail_keep_radius_);}
+    if (!trail_persistent_ && !keep_path_) {
+      surface_->forget_observed_outside(x, y, z, trail_keep_radius_);
+    }
     return;
   }
   if (trail_enabled_ && known_) {
@@ -1527,7 +1643,11 @@ void BigMapMapsManager::prepare_remesh(double x, double y, double z)
     known_->update();
   }
   if (observed_) {
-    if (!trail_persistent_) {observed_->forget_outside(x, y, trail_keep_radius_);}
+    if (keep_path_) {
+      observed_->forget_outside(x, y, occ_forget_radius_);   // occupancy.forget_distance
+    } else if (!trail_persistent_) {
+      observed_->forget_outside(x, y, trail_keep_radius_);
+    }
     observed_->update();
   }
 }
@@ -1544,7 +1664,8 @@ BigMapMapsManager::Remesh BigMapMapsManager::make_remesh(
   {
     bigmap_maps_manager::ProfScope s(prof, "remesh: extract (RTIN)");
     r.mesh = surface_ ? surface_->extract(x, y, z, params) :
-      mesher_->extract(x, y, params, trail_enabled_ ? known_.get() : nullptr, observed_.get());
+      mesher_->extract(
+      x, y, params, trail_enabled_ ? known_.get() : nullptr, observed_.get(), occupancy_.get());
   }
   {
     bigmap_maps_manager::ProfScope s(prof, "remesh: build NavMap");
@@ -1771,6 +1892,10 @@ void BigMapMapsManager::update(::easynav::NavState & nav_state)
       update_dynamic_map(nav_state, x, y, z, q);
     } else {
       release_sensor_obstacles(nav_state);
+    }
+    if (occupancy_) {
+      bigmap_maps_manager::ProfScope s(prof(), "occupancy keys");
+      sync_occupancy(x, y);
     }
   }
 

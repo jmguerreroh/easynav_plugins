@@ -135,6 +135,12 @@ private:
   void commit_remesh(Remesh && r);
   void mark_observed(double x, double y, double z);   // the obstacle borders seen from near
   void mark_trail(double x, double y, double z);
+  // The occupancy block (occupancy.*): its parameters (true if it is given), what is occupied
+  // (grid engine), and the sensed obstacles of the memory (forgotten beyond forget_distance) onto
+  // it; a re-mesh if they changed
+  bool read_occupancy_params();
+  void build_occupancy();
+  void sync_occupancy(double x, double y);
   void check_recovery(const ::easynav::NavState & nav_state);
   bool is_traversed(const bigmap_maps_manager::LodMesh & mesh, std::size_t t) const;
   ::navmap::NavMap build_navmap(const bigmap_maps_manager::LodMesh & mesh) const;
@@ -207,6 +213,9 @@ private:
   // obstacle borders (holes of the map) the robot has seen at full resolution (grid engine)
   std::unique_ptr<bigmap_maps_manager::KnownMap> observed_;
   bool observed_enabled_{true};
+  // occupancy.keep_path: the observed borders (of the map's obstacles only) are forgotten only
+  // beyond occupancy.forget_distance
+  bool keep_path_{false};
   double observed_mark_radius_{10.0};
   // no path to the goal for recovery_cycles_ cycles: full_res doubled up to recovery_max_factor_
   bool recovery_enabled_{true};
@@ -269,6 +278,14 @@ private:
   rclcpp::Publisher<navmap_ros_interfaces::msg::NavMapLayer>::SharedPtr layer_updates_pub_;
   rclcpp::Publisher<navmap_ros_interfaces::msg::NavMap>::SharedPtr navmap_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
+
+  // The occupancy block (occupancy.*, grid engine only): the size cap of the distance applies
+  // only where something is occupied (holes' borders, sensed obstacles)
+  std::unique_ptr<bigmap_maps_manager::OccupancyLod> occupancy_;
+  double occ_forget_radius_{60.0};    // occupancy.forget_distance
+  static constexpr double kOccRebuildPeriod = 1.0;   // s between two re-meshes for obstacles
+  bool occ_pending_{false};           // obstacles changed, re-mesh not done yet
+  double occ_last_remesh_{-1e9};
 
   // the re-mesh running in the worker (lod.async_remesh). Last member: destroyed first, its
   // destructor waits for the worker, which reads the members above

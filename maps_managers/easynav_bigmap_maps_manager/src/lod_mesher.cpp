@@ -34,6 +34,7 @@ struct Extractor
   double rx, ry;
   const KnownMap * known;
   const KnownMap * observed;
+  const OccupancyLod * occ;                       // occupancy mode (null: distance mode)
   const std::vector<std::uint8_t> * valid;       // per node; empty: all valid
   const std::vector<std::uint8_t> * cell_valid;  // per cell; empty: the node rule
   LodMesh & out;
@@ -110,8 +111,22 @@ struct Extractor
       const double leg = std::hypot(ax - cx, ay - cy) * dem.resolution;
       const double hyp = leg * M_SQRT2;
       const double d_eff = distance(mx, my, hyp);
-      // a narrow passage is split down to the grid's resolution whatever the distance
-      if (em.pinned(mx, my) || should_split_at(p, em.error(mx, my), leg, d_eff)) {
+      bool split = false;
+      if (occ) {
+        // no ground anywhere under it: nothing to split and nothing to show
+        if (occ->no_ground(mx, my)) {return;}
+        // the height error as always; the size cap of the distance only where something is
+        // occupied (a hole's border, a sensed obstacle): free ground is as large as its error
+        // allows
+        split = leg > p.min_size &&
+          (em.pinned(mx, my) || em.error(mx, my) > tolerance(p, d_eff) || leg > p.max_size ||
+          (occ->occupied(mx, my) &&
+          (leg > size_cap(p, d_eff) || occ->breaks_topology(mx, my))));
+      } else {
+        // a narrow passage is split down to the grid's resolution whatever the distance
+        split = em.pinned(mx, my) || should_split_at(p, em.error(mx, my), leg, d_eff);
+      }
+      if (split) {
         process(cx, cy, ax, ay, mx, my);
         process(bx, by, cx, cy, mx, my);
         return;
@@ -162,14 +177,14 @@ LodMesher::LodMesher(
 
 LodMesh LodMesher::extract(
   double robot_x, double robot_y, const LodParams & params, const KnownMap * known,
-  const KnownMap * observed) const
+  const KnownMap * observed, const OccupancyLod * occupancy) const
 {
   LodMesh mesh;
   std::unordered_map<std::uint32_t, std::uint32_t> index;
   index.reserve(4096);
   const int center = (dem_.side - 1) / 2;
   Extractor ex{errors_, dem_, params, observed_params(params), robot_x, robot_y, known, observed,
-    &valid_, &cell_valid_,
+    occupancy, &valid_, &cell_valid_,
     mesh, index, center, dem_.side - 1};
   const int ts = errors_.tile_size();
   ex.process(0, 0, ts, ts, ts, 0);

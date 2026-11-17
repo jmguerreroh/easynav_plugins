@@ -256,9 +256,73 @@ and only if it is in `filters`. At start the log prints the pipeline in use and 
 about) combinations that do nothing, such as the `navmap_filter` detector without an obstacle
 filter. Full description: the `bigmap_bringup` README, "Dynamic map and obstacles".
 
+## LOD by occupancy (the `occupancy` block)
+
+By default bigmap splits a NavCel if its height error is above the tolerance or if it is larger than
+the size cap of its distance: `lengths.cell_size.min` within `lengths.radii.full_res` of the robot,
+growing to `cell_size.max` at `lengths.radii.low_res_start`. Near the robot everything is at the
+minimum size, free ground too.
+
+With the `occupancy` block (grid engine only; giving any of its parameters turns it on) the size
+cap of the distance applies only to the NavCels with something **occupied** under them: the border
+of a hole of the map (a wall, a rack) or a sensed obstacle of the obstacle memory.
+
+```yaml
+bigmap:
+  plugin: easynav_bigmap_maps_manager/BigMapMapsManager
+  terrain:
+    initial_navmap: maps/my_map.navmap
+  occupancy:
+    cell_size: {min: 0.5, max: 32.0}  # m: smallest and largest NavCel
+    min_radius: 15.0       # m: within it, what is occupied has NavCels of cell_size.min
+    max_radius: 60.0       # m: there what is occupied reaches cell_size.max
+    forget_distance: 60.0  # m: sensed obstacles (and the kept path) farther than this are forgotten
+    keep_path: false       # true: the map's obstacles met on the way stay at full resolution
+  filters: [inflation]
+  inflation: {plugin: easynav_navmap_maps_manager/NavMapMapsManager/InflationFilter, inflation_radius: 2.0}
+```
+
+| Parameter | Default | |
+|---|---|---|
+| `occupancy.cell_size.min`, `max` | `lengths.cell_size.*` (1.0, 32.0) | m: smallest and largest NavCel |
+| `occupancy.min_radius` | `lengths.radii.full_res` (10.0) | m: within it, what is occupied has NavCels of `cell_size.min` |
+| `occupancy.max_radius` | `lengths.radii.low_res_start` (200.0) | m: there what is occupied reaches `cell_size.max` |
+| `occupancy.forget_distance` | `max_radius` | m: sensed obstacles farther than this are forgotten, fixed ones too, and their NavCels merge back; with `keep_path`, the kept borders too |
+| `occupancy.keep_path` | `false` | the borders of the map's obstacles (its holes, not the sensed obstacles) the robot has had within `min_radius` keep NavCels of the minimum size until it is farther than `forget_distance` |
+
+So within `min_radius` what is occupied, and only that, has NavCels of the minimum size; free ground
+is as large as its height error allows (up to `cell_size.max`), near the robot too; and beyond it
+what is occupied grows with the distance. The height error, the obstacles and the filters work as
+without the block. The block turns off by default what keeps free ground fine
+(`traversed.enabled`, `lod.observed.enabled`), the dynamic map's display (`dynamic_map.enabled`)
+and the ring removed around a sensed obstacle (`lengths.radii.obstacle_clearance: 0`: the inflation
+keeps the distance); any of them can still be set. The sensors are used within `min_radius`
+(`lengths.radii.sensor_range`). A change of the sensed obstacles re-meshes the map, at most once a
+second; the re-mesh runs in the cycle, as everything in EasyNav (`lod.async_remesh: true` moves it
+to a worker thread; in the warehouse it did not make the robot faster).
+
+**Doors and walls are never lost.** A coarse NavCel stands for ground or for a hole as a whole (the
+cell under its centroid decides). Wherever that would change what is connected (a coarse NavCel of
+ground over a wall opens it; one left out over a door or an aisle closes it) the zone is refined,
+whatever its distance, down to the largest NavCels that still show the door (ground through it)
+and the wall (a hole across it). A coarse NavCel is split if it would be shown as what is not most
+of it, if its ground (shown as ground) or its holes (left out) are in more than one piece, or if it
+holds a cell of a wall thinner than its leg (shown as ground) or of a passage narrower than its leg
+(left out); the width of a passage or the thickness of a wall is the shortest run of its kind
+through the cell. This depends on the cells only, so a door shared by two coarse NavCels is kept by
+both. Only the holes of the map count: the sensed obstacles are not kept this way.
+
+What is occupied is kept per node of the RTIN tree and propagated up as the height error is
+(`occupancy_lod.hpp`): the mesh has no T-junctions (`test/test_occupancy_lod.cpp`). On
+`large_warehouse_world` (700 x 450 m, cells of 0.5 m, min_radius 15 m, a few thousand racks,
+shelves and doors) the map has ~69 k NavCels and a re-mesh takes ~110 ms; its 42 doors and its one
+piece of ground are all in the mesh wherever the robot is (without the refinement of doors and
+walls the mesh had ~4 k NavCels, lost 6 to 8 doors and broke the ground in 14 to 39 pieces).
+
 ## Parameters
 
-All of them, with units, accepted values and defaults, are in the examples above. Invalid values
+All of them, with units, accepted values and defaults, are in the examples above (those of the
+`occupancy` block in the section above). Invalid values
 stop the node at start with a message naming the parameters. Names used by earlier versions
 (`lod_settings.*`, `traversed_ground.*`, `obstacle_source`...) are still accepted, with a warning
 that says what replaces them. `bigmap.inflation.inflation_radius` must be at least

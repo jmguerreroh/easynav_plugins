@@ -60,6 +60,20 @@ void ObstacleMemory::restore(double x, double y, double z, int hits)
   cell.hits = std::max(cell.hits, hits);
 }
 
+std::size_t ObstacleMemory::forget_outside(double x, double y, double radius)
+{
+  std::size_t n = 0;
+  for (auto it = cells_.begin(); it != cells_.end(); ) {
+    if (std::hypot(it->second.x - x, it->second.y - y) > radius) {
+      it = cells_.erase(it);
+      ++n;
+    } else {
+      ++it;
+    }
+  }
+  return n;
+}
+
 std::size_t ObstacleMemory::fixed_count() const
 {
   return static_cast<std::size_t>(std::count_if(

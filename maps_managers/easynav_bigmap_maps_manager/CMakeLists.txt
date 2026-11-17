@@ -39,6 +39,7 @@ add_library(${PROJECT_NAME}_lod SHARED
   src/lod_policy.cpp
   src/narrow_passages.cpp
   src/lod_mesher.cpp
+  src/occupancy_lod.cpp
   src/known_map.cpp
   src/navmap_dem.cpp
   src/surface_lod.cpp
@@ -101,6 +102,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_lod_mesher ${PROJECT_NAME}_lod)
   ament_add_gtest(test_lod_closure test/test_lod_closure.cpp TIMEOUT 600)
   target_link_libraries(test_lod_closure ${PROJECT_NAME}_lod)
+  ament_add_gtest(test_occupancy_lod test/test_occupancy_lod.cpp TIMEOUT 300)
+  target_link_libraries(test_occupancy_lod ${PROJECT_NAME}_lod)
   # the DEM file: also written by navmap_tools' navmap_gis_tool (a golden file keeps both honest)
   ament_add_gtest(test_dem_grid test/test_dem_grid.cpp)
   target_link_libraries(test_dem_grid ${PROJECT_NAME}_lod)

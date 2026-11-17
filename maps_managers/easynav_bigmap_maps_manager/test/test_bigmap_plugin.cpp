@@ -1282,3 +1282,172 @@ TEST_F(BigMapPluginTest, DISABLED_BenchmarkUpdateAndMemoryWhileTheRobotDrives)
   std::cerr << "update() ms: median " << percentile(ms, 0.5) << " p95 " << percentile(ms, 0.95)
             << " p99 " << percentile(ms, 0.99) << " max " << percentile(ms, 1.0) << "\n";
 }
+
+// The occupancy block: the size cap of the distance only where something is occupied
+namespace
+{
+std::size_t smallest_navcels(const ::navmap::NavMap & nm, float max_area)
+{
+  std::size_t n = 0;
+  for (::navmap::NavCelId c = 0; c < nm.navcels.size(); ++c) {
+    const auto & a = nm.positions;
+    const auto & t = nm.navcels[c].v;
+    const float ux = a.x[t[1]] - a.x[t[0]], uy = a.y[t[1]] - a.y[t[0]];
+    const float vx = a.x[t[2]] - a.x[t[0]], vy = a.y[t[2]] - a.y[t[0]];
+    n += 0.5f * std::abs(ux * vy - uy * vx) <= max_area;
+  }
+  return n;
+}
+}  // namespace
+
+TEST_F(BigMapPluginTest, OccupancyModeRefinesAroundASensedObstacleAndForgetsItFarAway)
+{
+  set("occupancy.min_radius", 6.0);
+  set("occupancy.max_radius", 12.0);   // and forget_distance: 12 m
+  set("lengths.remesh_step", 100.0);   // only the obstacles re-mesh here
+  set("obstacles.memory.min_time", 0.2);
+  set("obstacles.memory.max_hits", 1);   // the first hit fixes it
+  auto p = make();
+  robot_at_origin();
+  run(*p, false, 0.3);
+  // flat free ground: even within full_res (6 m) the NavCels are large
+  const auto before = nav_state_.get<::navmap::NavMap>("map.navmap").navcels.size();
+  const auto small_before =
+    smallest_navcels(nav_state_.get<::navmap::NavMap>("map.navmap"), 0.13f);
+  {
+    const auto & nm0 = nav_state_.get<::navmap::NavMap>("map.navmap");
+    std::size_t near = 0;
+    for (::navmap::NavCelId c = 0; c < nm0.navcels.size(); ++c) {
+      const auto q = nm0.navcel_centroid(c);
+      near += std::hypot(q.x(), q.y()) < 5.0f;
+    }
+    EXPECT_LT(near, 40u) << "free ground near the robot should be a few large NavCels";
+  }
+  run(*p, true, 1.0);    // the box, 3 m ahead (within full_res): a fixed obstacle
+  run(*p, false, 1.2);   // the re-mesh (at most one a second) and the cycle that commits it
+  const auto & nm = nav_state_.get<::navmap::NavMap>("map.navmap");
+  EXPECT_GT(nm.navcels.size(), before);
+  EXPECT_GT(smallest_navcels(nm, 0.13f), small_before) << "NavCels of 0.5 m around the box";
+  EXPECT_GT(count_at_least(at_box("obstacles"), ::navmap::LETHAL_OBSTACLE), 0u);
+
+  // the robot goes 10 m back (13 m from the box, beyond low_res_start): it is forgotten and the
+  // NavCels merge back
+  nav_msgs::msg::Odometry o;
+  o.header.frame_id = "map";
+  o.pose.pose.position.x = -10.0;
+  o.pose.pose.position.y = 0.0;
+  o.pose.pose.orientation.w = 1.0;
+  nav_state_.set("robot_pose", o);
+  run(*p, false, 1.5);
+  EXPECT_EQ(count_at_least(at_box("obstacles"), ::navmap::LETHAL_OBSTACLE), 0u);
+}
+
+TEST_F(BigMapPluginTest, OccupancyModeTurnsOffWhatKeepsFreeGroundFine)
+{
+  // no parameter but the mode (SetUp's obstacle_clearance 0 is the mode's default anyway)
+  overrides_.clear();
+  set("terrain.initial_navmap", map_file_);
+  set("lengths.cell_size.min", 0.5);
+  set("occupancy.min_radius", 6.0);   // the block, with no other parameter
+  auto p = make();
+  bool traversed = true, observed = true, dynamic = true, async = true;
+  double clearance = -1.0;
+  node_->get_parameter("bigmap.traversed.enabled", traversed);
+  node_->get_parameter("bigmap.lod.observed.enabled", observed);
+  node_->get_parameter("bigmap.dynamic_map.enabled", dynamic);
+  node_->get_parameter("bigmap.lengths.radii.obstacle_clearance", clearance);
+  node_->get_parameter("bigmap.lod.async_remesh", async);
+  EXPECT_FALSE(traversed);
+  EXPECT_FALSE(observed);
+  EXPECT_FALSE(dynamic);
+  EXPECT_EQ(clearance, 0.0);
+  EXPECT_FALSE(async);   // the re-mesh stays in the cycle
+}
+
+TEST_F(BigMapPluginTest, KeepPathIsReadWithTheOccupancyBlock)
+{
+  set("occupancy.keep_path", true);
+  auto p = make();
+  robot_at_origin();
+  run(*p, false, 0.2);
+  bool keep = false;
+  double forget = 0.0;
+  node_->get_parameter("bigmap.occupancy.keep_path", keep);
+  node_->get_parameter("bigmap.occupancy.forget_distance", forget);
+  EXPECT_EQ(forget, 12.0) << "forget_distance defaults to max_radius (low_res_start here)";
+  EXPECT_TRUE(keep);
+  EXPECT_TRUE(nav_state_.has("map.navmap"));
+}
+
+TEST_F(BigMapPluginTest, TheOccupancyBlockRejectsInconsistentRadii)
+{
+  set("occupancy.min_radius", 20.0);
+  set("occupancy.max_radius", 10.0);
+  EXPECT_THROW(make(), std::invalid_argument);
+  overrides_.clear();
+  SetUp();
+  set("occupancy.min_radius", 6.0);
+  set("occupancy.forget_distance", 3.0);   // closer than min_radius
+  EXPECT_THROW(make(), std::invalid_argument);
+}
+
+TEST_F(BigMapPluginTest, WithoutTheOccupancyBlockBigmapWorksAsAlways)
+{
+  auto p = make();
+  bool traversed = false, observed = false;
+  node_->get_parameter("bigmap.traversed.enabled", traversed);
+  node_->get_parameter("bigmap.lod.observed.enabled", observed);
+  EXPECT_TRUE(traversed);
+  EXPECT_TRUE(observed);
+  EXPECT_FALSE(node_->has_parameter("bigmap.occupancy.keep_path"));
+}
+
+// The occupancy block on a real map: BIGMAP_BENCH_NAVMAP=<map.navmap> BIGMAP_BENCH_X/Y (robot);
+// BIGMAP_BENCH_DISTANCE: without the block
+TEST_F(BigMapPluginTest, DISABLED_BenchmarkOccupancyModeOnARealMap)
+{
+  const char * path = std::getenv("BIGMAP_BENCH_NAVMAP");
+  ASSERT_NE(path, nullptr);
+  overrides_.clear();
+  set("terrain.initial_navmap", std::string(path));
+  set("lengths.cell_size.min", 0.5);
+  set("lengths.cell_size.max", 32.0);
+  set("lengths.radii.full_res", 15.0);
+  set("lengths.radii.low_res_start", 60.0);
+  if (!std::getenv("BIGMAP_BENCH_DISTANCE")) {   // the occupancy block, with the values above
+    set("occupancy.min_radius", 15.0);
+  }
+  set("output.publish_markers", false);
+  set("output.profile.enabled", true);
+  set("output.profile.period", 0.001);
+  set("filters", std::vector<std::string>{"inflation"});
+  set("inflation.plugin",
+      std::string("easynav_navmap_maps_manager/NavMapMapsManager/InflationFilter"));
+  set("inflation.inflation_radius", 2.0);
+  set("inflation.cost_scaling_factor", 1.5);
+  set("lod.async_remesh", std::getenv("BIGMAP_BENCH_ASYNC") != nullptr);
+  auto t0 = std::chrono::steady_clock::now();
+  auto p = make();
+  std::cerr << "initialize: " << std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - t0).count() << " s\n";
+  nav_msgs::msg::Odometry o;
+  o.header.frame_id = "map";
+  o.pose.pose.position.x =
+    std::getenv("BIGMAP_BENCH_X") ? std::atof(std::getenv("BIGMAP_BENCH_X")) :
+    100.0;
+  o.pose.pose.position.y =
+    std::getenv("BIGMAP_BENCH_Y") ? std::atof(std::getenv("BIGMAP_BENCH_Y")) :
+    300.0;
+  o.pose.pose.orientation.w = 1.0;
+  nav_state_.set("robot_pose", o);
+  for (int k = 0; k < 3; ++k) {
+    see(false);
+    t0 = std::chrono::steady_clock::now();
+    p->update(nav_state_);
+    std::cerr << "update " << k << ": " << std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - t0).count() << " ms, "
+              << nav_state_.get<::navmap::NavMap>("map.navmap").navcels.size() << " NavCels\n";
+    o.pose.pose.position.x += 6.0;   // a re-mesh every cycle
+    nav_state_.set("robot_pose", o);
+  }
+}

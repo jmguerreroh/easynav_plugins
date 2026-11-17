@@ -59,6 +59,9 @@ public:
   std::size_t fixed_count() const;
   /// Forgets everything (what a recovery would do to let the obstacles go)
   void clear() {cells_.clear();}
+  /// Forgets the cells farther than `radius` (m, on the plane) from (x, y), the fixed ones too.
+  /// Returns how many were forgotten.
+  std::size_t forget_outside(double x, double y, double radius);
 
 private:
   std::int64_t key(double x, double y, double z) const;

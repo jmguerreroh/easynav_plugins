@@ -21,6 +21,7 @@
 #include "easynav_bigmap_maps_manager/dem_grid.hpp"
 #include "easynav_bigmap_maps_manager/known_map.hpp"
 #include "easynav_bigmap_maps_manager/lod_policy.hpp"
+#include "easynav_bigmap_maps_manager/occupancy_lod.hpp"
 #include "easynav_bigmap_maps_manager/rtin_error_map.hpp"
 
 namespace bigmap_maps_manager
@@ -72,9 +73,15 @@ public:
   /// `observed` (optional, same rule): obstacle borders the robot has seen at full resolution,
   /// kept so (a hole seen from near does not close again when the robot goes away, which would
   /// let a plan through it and make the robot come back: an oscillation).
+  /// `occupancy` (optional): the occupancy block of bigmap (`occupancy.*`). The size cap of the
+  /// distance (size_cap()) then applies only to the triangles with something occupied under them
+  /// (the border of a hole, a sensed obstacle): within high_res_radius those are of min_size, and
+  /// free ground is as large as the height error allows (up to max_size). A triangle with no
+  /// ground under it is neither split nor emitted.
   LodMesh extract(
     double robot_x, double robot_y, const LodParams & params,
-    const KnownMap * known = nullptr, const KnownMap * observed = nullptr) const;
+    const KnownMap * known = nullptr, const KnownMap * observed = nullptr,
+    const OccupancyLod * occupancy = nullptr) const;
 
   const DemGrid & dem() const {return dem_;}
   const RtinErrorMap & error_map() const {return errors_;}
