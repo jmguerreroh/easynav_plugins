@@ -38,6 +38,7 @@
 #include "navmap_ros/navmap_io.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
 
 using easynav::bigmap::BigMapMapsManager;
 using navmap::NavCelId;
@@ -253,4 +254,37 @@ TEST_F(BigMapPluginTest, ASensedObstacleIsAddedFineAndForgottenFarAway)
   run(*p, false, 0.7);
   ASSERT_TRUE(at(13.0, 20.0, c));
   EXPECT_EQ(map().layer_get<std::uint8_t>("obstacles", c), 0);
+}
+
+TEST_F(BigMapPluginTest, ThePublishedMapHasTheFiltersLayersAndTheLevelsAreDrawn)
+{
+  auto p = make();
+  auto listener = rclcpp::Node::make_shared("bigmap_plugin_test_listener");
+  navmap_ros_interfaces::msg::NavMap::SharedPtr got;
+  visualization_msgs::msg::MarkerArray::SharedPtr markers;
+  const std::string base = std::string(node_->get_fully_qualified_name()) + "/bigmap";
+  auto sub = listener->create_subscription<navmap_ros_interfaces::msg::NavMap>(
+    base + "/map", rclcpp::QoS(1).transient_local().reliable(),
+    [&](navmap_ros_interfaces::msg::NavMap::SharedPtr m) {got = m;});
+  auto msub = listener->create_subscription<visualization_msgs::msg::MarkerArray>(
+    base + "/markers", rclcpp::QoS(1).transient_local().reliable(),
+    [&](visualization_msgs::msg::MarkerArray::SharedPtr m) {markers = m;});
+  robot_at(10.0, 20.0);
+  p->update(nav_state_);
+  for (int i = 0; i < 50 && (!got || !markers); ++i) {
+    rclcpp::spin_some(listener);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ASSERT_TRUE(got);
+  bool inflated = false;
+  for (const auto & l : got->layers) {
+    inflated |= l.name == "inflated_obstacles";
+  }
+  EXPECT_TRUE(inflated) << "the map is published after the filters";
+  ASSERT_TRUE(markers);
+  std::size_t circles = 0;
+  for (const auto & m : markers->markers) {
+    circles += m.ns == "level radii" && m.type == visualization_msgs::msg::Marker::LINE_STRIP;
+  }
+  EXPECT_EQ(circles, 3u);   // where levels 1, 2 and 3 start
 }

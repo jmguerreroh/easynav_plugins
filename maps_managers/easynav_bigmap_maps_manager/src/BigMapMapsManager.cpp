@@ -128,6 +128,8 @@ void BigMapMapsManager::on_initialize()
     base + "/map", rclcpp::QoS(1).transient_local().reliable());
   layer_updates_pub_ = node->create_publisher<navmap_ros_interfaces::msg::NavMapLayer>(
     base + "/map_updates", rclcpp::QoS(100));
+  markers_pub_ = node->create_publisher<visualization_msgs::msg::MarkerArray>(
+    base + "/markers", rclcpp::QoS(1).transient_local().reliable());
 }
 
 bool BigMapMapsManager::robot_pose(
@@ -216,17 +218,102 @@ void BigMapMapsManager::rebuild(
     std::chrono::duration<double, std::milli>(t2 - t1).count());
   tiles_ = tiles;
   built_at_ = robot.head<2>();
+  built_z_ = robot.z();
   has_map_ = true;
   map_changed_ = true;
   publish_pending_ = true;
 }
 
-void BigMapMapsManager::publish_map()
+void BigMapMapsManager::publish(const ::navmap::NavMap & nm)
 {
-  auto msg = navmap_ros::to_msg(map_);
-  msg.header.frame_id = RTTFBuffer::getInstance()->get_tf_info().map_frame;
-  msg.header.stamp = get_node()->now();
+  std_msgs::msg::Header header;
+  header.frame_id = RTTFBuffer::getInstance()->get_tf_info().map_frame;
+  header.stamp = get_node()->now();
+  auto msg = navmap_ros::to_msg(nm);
+  msg.header = header;
   map_pub_->publish(msg);
+
+  // Markers: a circle where each level starts (with its cell size) and the tiles in use, by level
+  visualization_msgs::msg::MarkerArray ma;
+  visualization_msgs::msg::Marker clear;
+  clear.header = header;
+  clear.action = visualization_msgs::msg::Marker::DELETEALL;
+  ma.markers.push_back(clear);
+  const int levels = lod_.levels();
+  auto color = [levels](int k, visualization_msgs::msg::Marker & m) {
+      const float t = levels > 1 ? static_cast<float>(k) / (levels - 1) : 0.0f;   // fine: red
+      m.color.r = 1.0f - t;
+      m.color.g = 0.4f + 0.4f * t;
+      m.color.b = t;
+      m.color.a = 1.0f;
+    };
+  const double z = std::isfinite(built_z_) ? built_z_ + 0.2 : 0.2;
+  int id = 0;
+  for (int k = 1; k < levels; ++k) {
+    visualization_msgs::msg::Marker c;
+    c.header = header;
+    c.ns = "level radii";
+    c.id = id++;
+    c.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    c.scale.x = 0.3;
+    c.pose.orientation.w = 1.0;
+    color(k, c);
+    const double r = lod_.radius(k);
+    for (int i = 0; i <= 120; ++i) {
+      geometry_msgs::msg::Point p;
+      p.x = built_at_.x() + r * std::cos(i * 2.0 * M_PI / 120.0);
+      p.y = built_at_.y() + r * std::sin(i * 2.0 * M_PI / 120.0);
+      p.z = z;
+      c.points.push_back(p);
+    }
+    ma.markers.push_back(c);
+    visualization_msgs::msg::Marker t;
+    t.header = header;
+    t.ns = "level radii";
+    t.id = id++;
+    t.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+    t.pose.position.x = built_at_.x();
+    t.pose.position.y = built_at_.y() + r;
+    t.pose.position.z = z + 1.0;
+    t.pose.orientation.w = 1.0;
+    t.scale.z = 2.0;
+    color(k, t);
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%.1f m cells from %.0f m", lod_.cell(k), r);
+    t.text = buf;
+    ma.markers.push_back(t);
+  }
+  std::vector<visualization_msgs::msg::Marker> tiles(levels);
+  for (int k = 0; k < levels; ++k) {
+    auto & m = tiles[k];
+    m.header = header;
+    m.ns = "tiles";
+    m.id = id++;
+    m.type = visualization_msgs::msg::Marker::LINE_LIST;
+    m.scale.x = 0.1;
+    m.pose.orientation.w = 1.0;
+    color(k, m);
+    m.color.a = 0.6f;
+  }
+  for (const auto t : tiles_) {
+    const auto b = lod_.bounds(t);
+    auto & m = tiles[lod_.level(t)];
+    const double xs[4] = {b[0], b[1], b[1], b[0]}, ys[4] = {b[2], b[2], b[3], b[3]};
+    for (int i = 0; i < 4; ++i) {
+      geometry_msgs::msg::Point a, c;
+      a.x = xs[i];
+      a.y = ys[i];
+      c.x = xs[(i + 1) % 4];
+      c.y = ys[(i + 1) % 4];
+      a.z = c.z = z;
+      m.points.push_back(a);
+      m.points.push_back(c);
+    }
+  }
+  for (auto & m : tiles) {
+    if (!m.points.empty()) {ma.markers.push_back(std::move(m));}
+  }
+  markers_pub_->publish(ma);
 }
 
 void BigMapMapsManager::update(::easynav::NavState & nav_state)
@@ -260,12 +347,6 @@ void BigMapMapsManager::update(::easynav::NavState & nav_state)
     nav_state.set("map.navmap", map_);
     map_changed_ = false;
   }
-  if (publish_pending_ && now - last_publish_ >= publish_period_) {
-    publish_map();
-    publish_pending_ = false;
-    last_publish_ = now;
-  }
-
   // Filters update the map in NavState in place, and record which cells they change
   const std::size_t subscribers = layer_updates_pub_->get_subscription_count();
   const bool new_subscriber = subscribers > last_subscribers_;
@@ -286,6 +367,12 @@ void BigMapMapsManager::update(::easynav::NavState & nav_state)
   }
   if (nav_state.has("map.navmap")) {
     const auto & nm = nav_state.get<::navmap::NavMap>("map.navmap");
+    // the map as the filters left it (with their layers, e.g. inflated_obstacles)
+    if (publish_pending_ && now - last_publish_ >= publish_period_) {
+      publish(nm);
+      publish_pending_ = false;
+      last_publish_ = now;
+    }
     for (const auto & l : nm.list_layers()) {
       nm.layers.get(l)->clear_changes();
     }

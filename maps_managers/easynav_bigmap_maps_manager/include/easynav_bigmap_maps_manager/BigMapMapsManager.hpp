@@ -42,6 +42,7 @@
 #include "navmap_ros_interfaces/msg/nav_map_layer.hpp"
 #include "pluginlib/class_loader.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
 
 namespace easynav
 {
@@ -69,7 +70,8 @@ private:
   bool sense(const ::easynav::NavState & nav_state, const Eigen::Vector3d & robot, double yaw);
   /// The map around the robot, into map_
   void rebuild(const std::vector<std::uint32_t> & tiles, const Eigen::Vector3d & robot);
-  void publish_map();
+  /// The map (as the filters left it) and the markers of its levels
+  void publish(const ::navmap::NavMap & nm);
 
   TiledLod lod_;
   SensedObstacles sensed_;
@@ -78,6 +80,7 @@ private:
   bool map_changed_{false};
   std::vector<std::uint32_t> tiles_;     ///< those in map_
   Eigen::Vector2d built_at_{0.0, 0.0};   ///< robot position when map_ was made
+  double built_z_{0.0};
   double last_build_{-1e18};             ///< s
   double last_publish_{-1e18};           ///< s
   bool publish_pending_{false};
@@ -98,6 +101,7 @@ private:
   std::vector<std::shared_ptr<easynav::navmap::NavMapFilter>> filters_;
   rclcpp::Publisher<navmap_ros_interfaces::msg::NavMap>::SharedPtr map_pub_;
   rclcpp::Publisher<navmap_ros_interfaces::msg::NavMapLayer>::SharedPtr layer_updates_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
   std::size_t last_subscribers_{0};
 };
 

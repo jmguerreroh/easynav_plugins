@@ -98,6 +98,12 @@ public:
 
   /// Level of a tile
   int level(std::uint32_t tile) const {return nodes_[tile].level;}
+  /// Bounds of a tile: x0, x1, y0, y1 (m)
+  std::array<float, 4> bounds(std::uint32_t tile) const
+  {
+    const auto & l = nodes_[tile].lines;
+    return {xs_[l[0]], xs_[l[1]], ys_[l[2]], ys_[l[3]]};
+  }
 
 private:
   struct Node

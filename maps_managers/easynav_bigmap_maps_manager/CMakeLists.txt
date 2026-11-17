@@ -19,6 +19,7 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(easynav_common REQUIRED)
 find_package(easynav_core REQUIRED)
 find_package(easynav_sensors REQUIRED)
@@ -62,6 +63,7 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
   ${navmap_ros_interfaces_TARGETS}
   ${nav_msgs_TARGETS}
   ${std_msgs_TARGETS}
+  ${visualization_msgs_TARGETS}
 )
 pluginlib_export_plugin_description_file(easynav_core easynav_bigmap_maps_manager_plugins.xml)
 
@@ -92,6 +94,7 @@ endif()
 ament_export_include_directories(include/${PROJECT_NAME})
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(
-  rclcpp rclcpp_lifecycle pluginlib nav_msgs std_msgs easynav_common easynav_core
-  easynav_sensors easynav_navmap_maps_manager navmap_core navmap_ros navmap_ros_interfaces Eigen3)
+  rclcpp rclcpp_lifecycle pluginlib nav_msgs std_msgs visualization_msgs
+  easynav_common easynav_core easynav_sensors easynav_navmap_maps_manager
+  navmap_core navmap_ros navmap_ros_interfaces Eigen3)
 ament_package()
