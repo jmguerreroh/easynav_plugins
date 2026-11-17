@@ -1,29 +1,26 @@
 # easynav_bigmap_maps_manager
 
-An [EasyNav](https://github.com/EasyNavigation) **maps manager plugin** (`easynav_bigmap_maps_manager/BigMapMapsManager`,
-parameter namespace `bigmap`) for maps too big to plan on at full resolution. It holds one NavMap
-that is **fine around the robot and coarse far away**, re-meshes it as the robot moves, and puts
-the obstacles the sensors see on it. Planner and controller plug-ins read it through the NavState
-(`map.navmap`) like any other NavMap.
+A maps manager for NavMaps too big to plan on at full detail (a warehouse, a town): the map is
+fine around the robot and coarse far from it, and the obstacles the sensors see are added near the
+robot and forgotten when it is far from them.
 
-What it gives the rest of the stack:
+Planning on it, against planning on the full map: 2 x 2 km around the Puerta del Sol, Madrid
+(ground from the IGN, buildings from the Catastro, 13.8 M NavCels at 0.5 m), 30 routes of 200 to
+1500 m, the same A*, the robot replanning every 30 m on the map made around it:
 
-- a NavMap (layers `occupancy`, `obstacles`, `inflated_obstacles`, `obstacle_hits`, `elevation`,
-  `lod_size`, `traversed`, vertex colours) published on `<node>/bigmap/map` and set in the NavState;
-- NavCels no bigger than needed: `lengths.cell_size.min` near the robot, up to `cell_size.max` far
-  away, and always fine over ramps, narrow passages and the ground the robot has driven over;
-- obstacles from the sensors with a memory (`obstacle_hits`), and the NavMap filters of
-  `easynav_navmap_maps_manager` (inflation...) applied on top;
-- services to save the map and to forget the obstacles (see "Run time").
+| Map | NavCels | MB | Success | Through a building | Length | A* per plan | NavCels expanded |
+|---|---|---|---|---|---|---|---|
+| full, 0.5 m | 13,765,636 | 321 | 30/30 | 0 | 1.000 | 620 ms | 1,166,402 |
+| grid 1 m | 3,275,294 | 77 | 21/30 | 0 | 1.006 | 90 ms | 190,060 |
+| grid 2 m | 744,768 | 18 | 28/30 | 0 | 1.008 | 25 ms | 71,510 |
+| grid 4 m | 156,118 | 3.9 | 13/30 | 0 | 1.354 | 10 ms | 24,202 |
+| bigmap (0.8 to 8 m, 20 to 300 m) | ~135,000 | 3.5 | 30/30 | 0 | 1.007 | 6.8 ms | 8,528 |
 
-Two engines, chosen by `multilevel.enabled`: the **grid engine** (outdoor terrain, one height per
-x, y: a height grid meshed with RTIN) and the **hierarchy engine** (buildings with floors over each
-other: the NavMap's own triangles merged by clustering). The details are in the
-`bigmap_bringup` README ("How the NavMap is reduced"), until they move here.
+The same paths as on the full map, 90 times faster, expanding 137 times fewer NavCels, on a map
+92 times smaller, made again in ~0.3 s every 30 m. Coarser fixed grids close streets (1 m and 4 m
+fail routes) or go around them (4 m: 35 % longer).
 
-## Use it
-
-In the parameter file of EasyNav, next to the other nodes:
+## Configuration
 
 ```yaml
 maps_manager_node:
@@ -31,321 +28,86 @@ maps_manager_node:
     map_types: [bigmap]
     bigmap:
       plugin: easynav_bigmap_maps_manager/BigMapMapsManager
-      terrain:
-        initial_navmap: maps/my_map.navmap     # where the map comes from: see the next section
+      package: easynav_large_warehouse            # optional: navmap_path_file is relative to it
+      navmap_path_file: maps/large_warehouse_collision.navmap
+      cell_size:
+        min: 0.5          # m: NavCels at the obstacles near the robot
+        max: 8.0          # m: the largest NavCel; far away the map is within max / 2
+      min_radius: 15.0    # m: within it, the obstacles have NavCels of cell_size.min
+      max_radius: 60.0    # m: from it, the map is as coarse as it gets
+      forget_distance: 60.0   # m: sensed obstacles farther than this are forgotten (default max_radius)
+      filters: [inflation]
+      inflation:
+        plugin: easynav_navmap_maps_manager/NavMapMapsManager/InflationFilter
+        inflation_radius: 2.0
+        cost_scaling_factor: 1.5
 ```
 
-Everything else has a default. Two complete, documented examples are installed with the package
-(`share/easynav_bigmap_maps_manager/config/`, and in `config/` here):
+That is all it needs. Three more parameters have defaults that suit most robots:
+`obstacle_min_height` (0.1 m: points lower above the map's surface are the ground),
+`obstacle_max_height` (2.0 m: higher points do not touch the robot) and `sensor_range` (30 m, at most
+`forget_distance`).
 
-| File | For | Map from | Localization |
-|---|---|---|---|
-| [config/example_indoor.yaml](config/example_indoor.yaml) | a building, several floors and ramps, real robot | a NavMap file (`terrain.initial_navmap`) | external (anything that gives `map -> odom`) |
-| [config/example_outdoor.yaml](config/example_outdoor.yaml) | open terrain with GPS (the simulation's file) | a DEM downloaded once (`terrain.dem_file`) | GPS + IMU + odometry (UKF) |
+The filters are those of `easynav_navmap_maps_manager`, run on the map every cycle. The inflation
+radius also sets how far around an obstacle the NavCels are fine (see below).
 
-Each file is a whole EasyNav configuration (system, sensors, localizer, controller, planner, maps
-manager); the part of this plugin is `maps_manager_node.ros__parameters.bigmap`, in numbered
-sections (2.1 terrain, 2.2 lengths, 2.3 lod, 2.4 traversed, 2.5 obstacles, 2.6 dynamic_map,
-2.7 filters, 2.8 output). The header of each file has the table of lengths and says which node
-reads what. Run EasyNav with one:
+## How
 
-```bash
-ros2 run easynav_system system_main --ros-args --params-file <file>
-```
+**Once, at start** (seconds: 12 s for the 2.5 M NavCels of the warehouse, 40 s for the 13.8 M of
+Madrid, on every core):
 
-The examples are copies of `bigmap_bringup/config/params_indoor.yaml` and `params_outdoor.yaml`,
-which the simulations use (a test keeps them equal).
+1. The NavMap is cut along a grid (`navmap::cut_along_lines`) into square tiles of `min_radius / 2`.
+2. Each tile is simplified (`navmap::simplify`) within `cell_size.min / 2`, no edge longer than
+   `cell_size.max`: level 0.
+3. Level k: four tiles of level k - 1 put together and simplified within twice the error, up to
+   `cell_size.max / 2` (a quadtree; 0.5 / 1 / 2 / 4 / 8 m are five levels).
 
-## Where the map comes from
+`simplify` keeps the map's topology (no hole closes, no wall opens, however coarse) and its layers.
+The corners of a tile and the points where the map's border leaves its sides are kept
+(`SimplifyParams::keep_vertices`), so its sides only lose vertices along them.
 
-The plugin starts from **one** of these, in this order of precedence (`terrain.*`):
+**Every cycle**, when the robot has moved a few metres or the sensed obstacles changed (at most
+twice a second):
 
-1. `terrain.initial_navmap`: a NavMap file. Any resolution, indoors or outdoors.
-2. `terrain.dem_file`: a DEM (height grid) file that `navmap_gis_tool --dem-out` writes.
-   The plugin waits `terrain.dem_wait_timeout` s for it to exist.
+1. **Select** the coarsest tile each place allows: level 0 within `min_radius`, the coarsest from
+   `max_radius`, geometric in between.
+2. **Assemble** them in one NavMap. Where a tile has a vertex on a side its neighbour does not,
+   the neighbour's NavCel there is split to reach it, so the map is conforming (no cracks) and the
+   planner crosses from tile to tile.
+3. **Detail** (`navmap::refine`, longest-edge bisection): within `min_radius`, the borders of the
+   map (walls, racks, the edges of the holes) and the sensed obstacles get NavCels of
+   `cell_size.min`, and so does every NavCel within the inflation radius of them (the cost of a
+   NavCel is that of its centroid: a large one next to an obstacle would read as free). Free
+   ground away from them stays as large as it was. Farther obstacles get the cell size of their
+   place.
+4. The sensed obstacles are marked `LETHAL_OBSTACLE` in the layer `obstacles`; the filters run.
 
-With neither, the plugin does not start (it says which parameter is missing).
-
-### A NavMap file (indoors, or any place you have a map of)
-
-`terrain.initial_navmap` is a path (`~` allowed), or relative to the share directory of
-`terrain.package` if you give one (`package: my_robot_maps`, `initial_navmap: maps/site.navmap`).
-
-- **Grid engine** (`multilevel.enabled: false`, one floor): the NavMap is resampled onto a height
-  grid of `terrain.initial_navmap_resolution` m (0 = `lengths.cell_size.min`) centred on the map's
-  own (0, 0, 0): keep the map centred. A node is ground if a NavCel covers it; a gap of one node is
-  filled, a gap of two or more stays; NaN heights are no data.
-- **Hierarchy engine** (`multilevel.enabled: true`, floors over each other): the NavMap's own
-  triangles are used, so nothing is resampled. Required for a building with several floors.
-- `terrain.drop_unreachable_ground: true` keeps only the largest connected piece of ground the robot
-  can drive on (slope <= `terrain.max_slope_deg`), plus the walls that touch it: roofs, plateaus with
-  no way up and floors not joined to the rest disappear, so a goal picked there (RViz takes the
-  topmost surface under the mouse) is impossible instead of unreachable. Use it in cities and
-  buildings, not for maps of separate pieces; the robot must start on the largest one.
-- A `traversed` layer in the file starts that ground as known. A saved map's `obstacle_hits`
-  counts come back into the obstacle memory.
-- `<map>.yaml` next to the file (same name) holds where the map's (0, 0, 0) is on Earth; without
-  it the map has no geolocation (origin 0, 0, 0):
-
-  ```yaml
-  georeferenced: true
-  origin_lat: 40.284796        # WGS84 deg
-  origin_lon: -3.821407
-  reference_altitude: 650.9    # m ASL of z = 0
-  min_resolution: 1.0
-  ```
-
-**How to get a NavMap file:**
-
-| You have | Do |
-|---|---|
-| a point cloud (`.pcd`, LiDAR, SLAM, photogrammetry) | `ros2 run navmap_tools pointcloud_to_navmap --input cloud.pcd --output map.navmap --resolution 0.4 --min-clearance 1.0 --recenter` (below) |
-| a map the plugin saved | `ros2 service call /maps_manager_node/bigmap/save_map std_srvs/srv/Trigger` writes `map_all_<date>.navmap` and its `.yaml` in `output.save_directory`; use it as `initial_navmap` |
-| a mesh of the terrain (STL) | the DEM generator with `elevation_source: mesh` (outdoors, next section) |
-| a NavMap from another tool | use it as it is: `navmap_core` format |
-
-`pointcloud_to_navmap` (package `navmap_tools`, in the NavMap repository) streams clouds of tens of millions of points and writes
-`map.navmap` and `map.yaml`. The options that matter:
-
-- `--resolution`: the finest NavCel; use your `lengths.cell_size.min`.
-- `--min-clearance`: free height that separates two floors; it must be **below** the headroom of
-  the lowest ramp (floors 2.2 m apart: 1.0 to 1.5 keeps them joined, 2.0 cuts the ramp).
-- `--max-slope-deg`: surfaces steeper than this stay as gaps (walls).
-- `--recenter`: shifts the map so its centre is (0, 0); the shift goes to the `.yaml` as
-  `offset_x` / `offset_y`.
-- `--origin lat,lon,alt`: makes the map georeferenced (the `.yaml` above).
-- `--crop x0,y0,x1,y1`, `--zmin`, `--zmax`: keep only a window (a height window drops roofs and
-  canopies).
-- Keep the cloud in local coordinates: a PCD stores float32, 0.5 m of precision at UTM northings.
-
-The tool tells you if the data holds the resolution you asked. All options: `--help`.
-
-### Outdoor: getting the map
-
-Outdoors the plugin reads a **DEM file**: a square grid of heights around a GPS origin (the
-`DemGrid` of the plugin, `src/dem_grid.cpp`). The tool that builds it, from open data and
-once, is `navmap_gis_tool` of the NavMap repository (package `navmap_tools`) with `--dem-out`. All
-the sources are free and need no account or API key:
-
-| `--dem-source` | Covers | Resolution | Data |
-|---|---|---|---|
-| `ign` | Spain | 5 m | IGN terrain model (PNOA-LiDAR); the imagery is the PNOA orthophoto (`--imagery-source pnoa`) |
-| `copernicus30` (default) | the whole world | 30 m | Copernicus DEM GLO-30 (AWS Open Data) |
-| `mesh` | wherever your STL is | your mesh | `--mesh-file`, in the map's local frame |
-| `synthetic` | nowhere (a test terrain) | | offline, to try the rest |
-
-**Step by step** (no launch needed):
-
-1. Pick the place (`--center lat,lon`, WGS84; it becomes the map's (0, 0)) and the size (`--size`,
-   the side of the square in metres; the grid has `(size / resolution + 1)^2` nodes), and run the
-   tool once:
-
-   ```bash
-   ros2 run navmap_tools navmap_gis_tool --center 40.284796,-3.821407 --size 1000 \
-       --resolution 1.0 --dem-source ign --dem-out $HOME/.ros/bigmap/elevation_cache.bin
-   ```
-
-   - `--resolution`: m between DEM nodes = the smallest NavCel (`lengths.cell_size.min` should be the
-     same). The source is sampled at its native spacing (`--dem-data-resolution`, 5 m for `ign`) and
-     interpolated: a finer grid is smoother, not more detailed.
-   - `--dem-imagery` (with `--imagery-source pnoa|esri|xyz`): paint the satellite image on the
-     vertices (RViz colours). They play no part in navigation.
-   - `--reference-altitude`: the altitude above sea level that is z = 0; by default the height at
-     the origin.
-   - The file is written where `--dem-out` says. **It must be
-     `maps_manager_node.bigmap.terrain.dem_file`** (the example parameter file has it).
-   - If the file exists and was made with the same origin, size, resolution and source it is reused
-     and nothing is downloaded (`--force-refresh` builds it again).
-2. The tool prints the *reference altitude* (`reference altitude 648.0 m`), the altitude of z = 0.
-   Set the UKF origin of the localizer to the `--center` and that altitude:
-   `localizer_node.ukf.latitude_origin`, `longitude_origin` and `altitude_origin`
-   (`bigmap_bringup`'s launch writes an overrides file with them for you).
-3. Run EasyNav with the parameter file. The plugin loads `terrain.dem_file`, builds the NavMap around
-   the robot and publishes it:
-
-   ```bash
-   ros2 run easynav_system system_main --ros-args --params-file my_outdoor.yaml
-   ```
-
-Other things the tool takes:
-
-| Option | What |
-|---|---|
-| `--dem-source mesh` + `--mesh-file`, `--mesh-world-elevation`, `--mesh-cell` | an STL already in the map's local frame (x east, y north, z up) and the altitude ASL of its z = 0; the area is capped to the mesh's footprint |
-| `--terrain-out DIR` + `--terrain-resolution` | also export the DEM as a Gazebo terrain (`terrain.stl` for the collision, `terrain.obj/.mtl/.png` for the visual), in the map frame |
-| `--world-template F` + `--world-out W` | with `--terrain-out`: fill `@LATITUDE@`, `@LONGITUDE@`, `@ELEVATION@` and `@TERRAIN_DIR@` of a world template (the simulations of `bigmap_bringup` use it) |
-
-The same tool makes a Gazebo package of the place (`--gazebo`) or a NavMap of its terrain
-(`--navmap`): see its `--help`.
-
-**Outside Spain.**
-
-```bash
-ros2 run navmap_tools navmap_gis_tool --center 46.0207,7.7491 --size 1000 --resolution 1.0 \
-    --dem-source copernicus30 --dem-out $HOME/.ros/bigmap/elevation_cache.bin
-```
-
-(that place, Zermatt, gives a reference altitude of about 1600 m, as it should.) What to know:
-
-- The data is 30 m, so the terrain is smoother than the IGN's: ditches, kerbs and walls of a few
-  metres do not exist in it. For those, make a NavMap of your own (previous section).
-- Heights are above sea level; z = 0 is the terrain at the origin unless `--reference-altitude`
-  says otherwise, as with the IGN.
-- **Satellite colours** are optional. `--imagery-source esri` (worldwide, no key) or
-  `--imagery-source xyz --imagery-url https://<server>/<path>/{z}/{x}/{y}.jpg` (any XYZ tile server;
-  `--zoom` must be one the server has; which server to use, and under what terms, is your choice:
-  check the provider's terms of use). Without `--dem-imagery` the terrain is built without colours.
-- The area world of `easynav_playground_bigmap` (buildings, trees, walls) is Spain only for the Catastro; elsewhere OpenStreetMap.
-
-**Alternatives outdoors**, if you do not use the download: make a NavMap file of the terrain
-(previous section) and set `terrain.initial_navmap` instead of `dem_file`; set the UKF origin by
-hand (or from the map's `.yaml`: `origin_lat`, `origin_lon`, `reference_altitude`).
-
-## Run time
-
-Services (`/<maps_manager_node>/bigmap/...`, all `std_srvs/srv/Trigger`):
-
-| Service | What |
-|---|---|
-| `save_map` | writes the whole map (at the current resolutions) to `output.save_directory` as `map_all_<date>.navmap` + `.yaml` |
-| `save_traversed` | the same, only the ground the robot has driven over |
-| `clear_obstacles` | forgets every obstacle of the memory, the fixed ones too (for a recovery) |
-
-The write happens in the plugin's next update; the result is in the log.
-
-Parameters that can be changed while running: `obstacles.memory.enabled` (off: the fixed obstacles
-are released at once and detections block as without the memory), `output.view_max_z` (cuts the
-map RViz shows, to choose a floor), and the usual `ros2 param set /maps_manager_node bigmap.<name>`.
-
-Topics: `<node>/bigmap/map` (NavMap, transient local), `.../map_updates`, `.../dynamic_map`,
-`.../markers`.
-
-## Reliability, speed and memory
-
-- **Holes are obstacles, exactly.** From a NavMap the grid engine keeps, per grid cell, whether the
-  map has ground there: at full resolution every hole of the map is where it is, however small (a
-  block of one cell is an obstacle of one cell). `lod.hole_error` (m) makes the border of the holes
-  count as a height error, so they keep their shape farther away.
-- **Obstacles seen from near stay seen** (`lod.observed.enabled`): the hole borders within
-  `lengths.radii.observed_mark` of the robot stay at full resolution (within
-  `lengths.radii.observed_full_res` of them) wherever the robot goes, until it is farther than
-  `traversed_keep` (mode `circles`). A coarse NavCel can no longer close, from far, a hole the
-  robot saw from near: no plan through it, no back and forth between two meshes.
-- **No path, finer map** (`recovery.*`): with a goal and no path for `no_path_cycles` cycles,
-  `full_res` is doubled (up to `max_full_res_factor` times) and the map re-meshed; back to normal
-  when the goal is reached or dropped.
-- **Re-mesh in a worker** (`lod.async_remesh`, off by default): the cycle that asks for a re-mesh
-  does not wait for it; the previous map is used until the new one is ready.
-- **Hierarchy engine: incremental extraction.** The far cut (what the mesh is with the robot
-  infinitely far) is computed once; each re-mesh climbs again only the vertices near the robot and
-  near the driven-over / observed ground. Its cost is that of the region around the robot.
-- **Memory.** The NavMap file is read as its arrays (never built as a NavMap only to be read); the
-  error map is 2 bytes per node (centimetres) and holds no copy of the heights; the hierarchy keeps
-  compact arrays (colours as bytes, slopes in hundredths of a degree, cells as sorted arrays). The
-  log prints the size of the mesher at start.
-
-## Obstacles and filters, in one paragraph
-
-`obstacles.detector` says who finds the obstacles: `bigmap_dynamic` (the plugin analyses the
-sensors: a detection that stays 5 s over a NavCel is an obstacle, `max_hits` of those fix it for
-good) or `navmap_filter` (an `ObstaclesFilter` of `easynav_navmap_maps_manager` does, bigmap does
-not). Then `removal` takes the obstacle NavCels (and a ring of `lengths.radii.obstacle_clearance`)
-out of the map, the **filters** run in the order of the `filters` list (`inflation` writes
-`inflated_obstacles`, which the planner reads), and `tint` paints the obstacles. A filter runs if
-and only if it is in `filters`. At start the log prints the pipeline in use and refuses (or warns
-about) combinations that do nothing, such as the `navmap_filter` detector without an obstacle
-filter. Full description: the `bigmap_bringup` README, "Dynamic map and obstacles".
-
-## LOD by occupancy (the `occupancy` block)
-
-By default bigmap splits a NavCel if its height error is above the tolerance or if it is larger than
-the size cap of its distance: `lengths.cell_size.min` within `lengths.radii.full_res` of the robot,
-growing to `cell_size.max` at `lengths.radii.low_res_start`. Near the robot everything is at the
-minimum size, free ground too.
-
-With the `occupancy` block (grid engine only; giving any of its parameters turns it on) the size
-cap of the distance applies only to the NavCels with something **occupied** under them: the border
-of a hole of the map (a wall, a rack) or a sensed obstacle of the obstacle memory.
-
-```yaml
-bigmap:
-  plugin: easynav_bigmap_maps_manager/BigMapMapsManager
-  terrain:
-    initial_navmap: maps/my_map.navmap
-  occupancy:
-    cell_size: {min: 0.5, max: 32.0}  # m: smallest and largest NavCel
-    min_radius: 15.0       # m: within it, what is occupied has NavCels of cell_size.min
-    max_radius: 60.0       # m: there what is occupied reaches cell_size.max
-    forget_distance: 60.0  # m: sensed obstacles (and the kept path) farther than this are forgotten
-    keep_path: false       # true: the map's obstacles met on the way stay at full resolution
-  filters: [inflation]
-  inflation: {plugin: easynav_navmap_maps_manager/NavMapMapsManager/InflationFilter, inflation_radius: 2.0}
-```
-
-| Parameter | Default | |
+| | Warehouse (2.5 M NavCels) | Madrid, 2 x 2 km (13.8 M) |
 |---|---|---|
-| `occupancy.cell_size.min`, `max` | `lengths.cell_size.*` (1.0, 32.0) | m: smallest and largest NavCel |
-| `occupancy.min_radius` | `lengths.radii.full_res` (10.0) | m: within it, what is occupied has NavCels of `cell_size.min` |
-| `occupancy.max_radius` | `lengths.radii.low_res_start` (200.0) | m: there what is occupied reaches `cell_size.max` |
-| `occupancy.forget_distance` | `max_radius` | m: sensed obstacles farther than this are forgotten, fixed ones too, and their NavCels merge back; with `keep_path`, the kept borders too |
-| `occupancy.keep_path` | `false` | the borders of the map's obstacles (its holes, not the sensed obstacles) the robot has had within `min_radius` keep NavCels of the minimum size until it is farther than `forget_distance` |
+| Map around the robot | ~27 k NavCels (~35 k with the detail) | ~157 k |
+| Assemble | 7 ms | 45-65 ms |
+| Detail | 30 ms | 70-190 ms |
 
-So within `min_radius` what is occupied, and only that, has NavCels of the minimum size; free ground
-is as large as its height error allows (up to `cell_size.max`), near the robot too; and beyond it
-what is occupied grows with the distance. The height error, the obstacles and the filters work as
-without the block. The block turns off by default what keeps free ground fine
-(`traversed.enabled`, `lod.observed.enabled`), the dynamic map's display (`dynamic_map.enabled`)
-and the ring removed around a sensed obstacle (`lengths.radii.obstacle_clearance: 0`: the inflation
-keeps the distance); any of them can still be set. The sensors are used within `min_radius`
-(`lengths.radii.sensor_range`). A change of the sensed obstacles re-meshes the map, at most once a
-second; the re-mesh runs in the cycle, as everything in EasyNav (`lod.async_remesh: true` moves it
-to a worker thread; in the warehouse it did not make the robot faster).
+**Sensed obstacles**: the points of the perceptions within `sensor_range`, in the robot's footprint
+frame, between `obstacle_min_height` and `obstacle_max_height` above the map's surface under them.
+A point over no surface (a hole: a rack, a building) is the map's own obstacle and is left out. They
+are remembered by cells of `cell_size.min / 2` until the robot is `forget_distance` from them.
 
-**Doors and walls are never lost.** A coarse NavCel stands for ground or for a hole as a whole (the
-cell under its centroid decides). Wherever that would change what is connected (a coarse NavCel of
-ground over a wall opens it; one left out over a door or an aisle closes it) the zone is refined,
-whatever its distance, down to the largest NavCels that still show the door (ground through it)
-and the wall (a hole across it). A coarse NavCel is split if it would be shown as what is not most
-of it, if its ground (shown as ground) or its holes (left out) are in more than one piece, or if it
-holds a cell of a wall thinner than its leg (shown as ground) or of a passage narrower than its leg
-(left out); the width of a passage or the thickness of a wall is the shortest run of its kind
-through the cell. This depends on the cells only, so a door shared by two coarse NavCels is kept by
-both. Only the holes of the map count: the sensed obstacles are not kept this way.
+## Topics
 
-What is occupied is kept per node of the RTIN tree and propagated up as the height error is
-(`occupancy_lod.hpp`): the mesh has no T-junctions (`test/test_occupancy_lod.cpp`). On
-`large_warehouse_world` (700 x 450 m, cells of 0.5 m, min_radius 15 m, a few thousand racks,
-shelves and doors) the map has ~69 k NavCels and a re-mesh takes ~110 ms; its 42 doors and its one
-piece of ground are all in the mesh wherever the robot is (without the refinement of doors and
-walls the mesh had ~4 k NavCels, lost 6 to 8 doors and broke the ground in 14 to 39 pieces).
-
-## Parameters
-
-All of them, with units, accepted values and defaults, are in the examples above (those of the
-`occupancy` block in the section above). Invalid values
-stop the node at start with a message naming the parameters. Names used by earlier versions
-(`lod_settings.*`, `traversed_ground.*`, `obstacle_source`...) are still accepted, with a warning
-that says what replaces them. `bigmap.inflation.inflation_radius` must be at least
-`system_node.robot_geometry.inscribed_radius`.
-
-## Related packages
-
-| Package | What it is | Needed by the plugin? |
+| Topic | Type | |
 |---|---|---|
-| `navmap_tools` (NavMap) | `pointcloud_to_navmap` and `navmap_gis_tool`: the tools that make the NavMap and DEM files | no (offline tools) |
-| `bigmap_bringup` | the application: launch file (the DEM, EasyNav, RViz), the complete parameter files the examples are copied from, maps; runs on a real robot and on a simulated one | no |
-| `easynav_playground_bigmap` | the simulations: Gazebo worlds of a place with the Summit | no |
+| `<node>/<plugin>/map` | `navmap_ros_interfaces/msg/NavMap` | the map, when it changes (at most once a second) |
+| `<node>/<plugin>/map_updates` | `navmap_ros_interfaces/msg/NavMapLayer` | what the filters change, as the NavMap maps manager |
+
+## From NavMap
+
+It is built on NavMap's tools: `simplify` (with `keep_vertices`), `cut_along_lines` and `refine`
+(`navmap_core/Subdivide.hpp`).
 
 ## Tests
 
-`colcon test --packages-select easynav_bigmap_maps_manager`: unit tests of the meshers, the obstacle
-memory, the pipeline check and the DEM from a NavMap; a test of the plugin itself (parameters,
-`initialize()`, `update()` with a pose and sensor points); and a regression test of the hierarchy
-engine on the real parking-garage map. Tests that need a real map of your own are skipped unless
-`BIGMAP_TEST_NAVMAP=<file>` is set. Build with `-DCMAKE_BUILD_TYPE=Release` (the meshers are
-slow in Debug).
-
-## Author and license
-
-Copyright 2026 José Miguel Guerrero (<josemiguel.guerrero@urjc.es>), author and maintainer.
-Licensed under the Apache License, Version 2.0 (see `LICENSE` in the repository root).
+`colcon test --packages-select easynav_bigmap_maps_manager`: the engine (`test_tiled_lod`: levels,
+no cracks, holes and narrow passages kept far away, layers) and the plugin as EasyNav runs it
+(`test_bigmap_plugin`: fine at the borders near the robot and coarse far, the map follows the robot,
+a sensed obstacle is added fine, inflated and forgotten far away).
