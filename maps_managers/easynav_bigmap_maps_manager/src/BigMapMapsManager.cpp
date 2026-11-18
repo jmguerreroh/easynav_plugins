@@ -20,6 +20,9 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -91,7 +94,13 @@ void BigMapMapsManager::on_initialize()
   rebuild_period_ = param("rebuild_period", rebuild_period_);
 
   // Built once, on every core: a startup step, not part of the cycle
-  const auto st = lod_.build(source, lp, std::max(1u, std::thread::hardware_concurrency()));
+  const std::size_t source_navcels = source.navcels.size();
+  const auto st = lod_.build(
+    std::move(source), lp, std::max(1u, std::thread::hardware_concurrency()));
+#if defined(__GLIBC__)
+  // the building threads leave most of what they used free but kept by the allocator
+  malloc_trim(0);
+#endif
   std::string levels;
   for (int k = 0; k < lod_.levels(); ++k) {
     char buf[96];
@@ -102,7 +111,7 @@ void BigMapMapsManager::on_initialize()
   }
   RCLCPP_INFO(
     node->get_logger(), "[%s] %s: %zu NavCels, %zu tiles, in %.1f s. Levels: %s", name.c_str(),
-    path.c_str(), source.navcels.size(), st.tiles, st.seconds, levels.c_str());
+    path.c_str(), source_navcels, st.tiles, st.seconds, levels.c_str());
   // As fine as the points are thinned: every NavCel an obstacle covers gets one
   sensed_ = SensedObstacles(lod_.cell(0) / 2.0);
   known_ = static_cast<float>(lod_.cell(0));
